@@ -1,0 +1,55 @@
+name: MGC feed
+
+on:
+  schedule:
+    - cron: "5 10 * * 1-5"    # ~6:05 AM ET (EDT) / 5:05 AM ET (EST), before the morning tracker
+    - cron: "25 21 * * 1-5"   # ~5:25 PM ET after the daily close (EDT)
+    - cron: "25 22 * * 1-5"   # ~5:25 PM ET after the daily close (EST, Nov-Mar)
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: mgc-feed
+  cancel-in-progress: false
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - run: pip install -r requirements.txt
+
+      - name: Fetch MGC bars from Databento
+        env:
+          DATABENTO_API_KEY: ${{ secrets.DATABENTO_API_KEY }}
+        run: python fetch_mgc.py --out /tmp/mgc.json
+
+      # The repo is public: only the encrypted file is ever committed.
+      - name: Encrypt
+        env:
+          FEED_PASSPHRASE: ${{ secrets.FEED_PASSPHRASE }}
+        run: |
+          test -n "$FEED_PASSPHRASE" || { echo "FEED_PASSPHRASE secret missing"; exit 1; }
+          openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -salt -base64 \
+            -in /tmp/mgc.json -out mgc.json.enc -pass env:FEED_PASSPHRASE
+          rm -f /tmp/mgc.json
+
+      - name: Commit mgc.json.enc
+        run: |
+          git config user.name "mgc-feed-bot"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add mgc.json.enc
+          git diff --cached --quiet && { echo "No changes"; exit 0; }
+          git commit -m "MGC feed $(date -u +%Y-%m-%dT%H:%MZ)"
+          git pull --rebase
+          git push
